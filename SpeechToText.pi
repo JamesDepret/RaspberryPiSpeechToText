@@ -1,0 +1,99 @@
+import sounddevice as sd
+import soundfile as sf
+import subprocess
+from pathlib import Path
+import time
+
+DEVICE_INDEX = 1
+SAMPLERATE = 48000
+TARGET_SAMPLERATE = 16000
+DURATION = 5
+CHANNELS = 1
+
+OUTPUT_WAV = "test_python.wav"
+OUTPUT_WAV_16K = "test_python_16k.wav"
+
+WHISPER_DIR = Path("/home/jamesberry/speech_test/whisper.cpp")
+MODEL_PATH = WHISPER_DIR / "models" / "ggml-medium.bin"
+CLI_PATH = WHISPER_DIR / "build" / "bin" / "whisper-cli"
+VAD_MODEL_PATH = WHISPER_DIR / "models" / "ggml-silero-v6.2.0.bin"
+
+for p in [WHISPER_DIR, MODEL_PATH, CLI_PATH, VAD_MODEL_PATH]:
+    if not p.exists():
+        raise FileNotFoundError(f"Missing required path: {p}")
+
+print(f"Recording from device {DEVICE_INDEX} for {DURATION} seconds...")
+
+pipeline_start = time.perf_counter()
+
+record_start = time.perf_counter()
+audio = sd.rec(
+    int(DURATION * SAMPLERATE),
+    samplerate=SAMPLERATE,
+    channels=CHANNELS,
+    dtype="int16",
+    device=DEVICE_INDEX
+)
+sd.wait()
+record_end = time.perf_counter()
+
+sf.write(OUTPUT_WAV, audio, SAMPLERATE, subtype="PCM_16")
+print(f"Saved raw recording as {OUTPUT_WAV}")
+
+resample_start = time.perf_counter()
+ffmpeg_cmd = [
+    "ffmpeg", "-y",
+    "-i", OUTPUT_WAV,
+    "-ar", str(TARGET_SAMPLERATE),
+    "-ac", "1",
+    "-c:a", "pcm_s16le",
+    OUTPUT_WAV_16K
+]
+ffmpeg_result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+resample_end = time.perf_counter()
+
+if ffmpeg_result.returncode != 0:
+    print("FFmpeg conversion failed:")
+    print(ffmpeg_result.stderr)
+    raise SystemExit(1)
+
+print(f"Saved whisper-ready file as {OUTPUT_WAV_16K}")
+
+cmd = [
+    str(CLI_PATH),
+    "--model", str(MODEL_PATH),
+    "--file", OUTPUT_WAV_16K,
+    "--language", "nl",
+    "--no-timestamps",
+    "--vad",
+    "--vad-model", str(VAD_MODEL_PATH),
+    "--prompt", "Dit is een Nederlandse transcriptie. Schrijf cijfers letterlijk als 1 2 3."
+]
+
+transcribe_start = time.perf_counter()
+result = subprocess.run(cmd, capture_output=True, text=True)
+transcribe_end = time.perf_counter()
+
+pipeline_end = time.perf_counter()
+
+record_time = record_end - record_start
+resample_time = resample_end - resample_start
+transcribe_time = transcribe_end - transcribe_start
+total_time = pipeline_end - pipeline_start
+
+if result.returncode != 0:
+    print("Transcription failed:")
+    print(result.stderr)
+else:
+    print("Transcript:")
+    print(result.stdout.strip())
+
+print("\n--- Timing ---")
+print(f"Model: {MODEL_PATH.name}")
+print(f"Record time: {record_time:.2f} s")
+print(f"Resample time: {resample_time:.2f} s")
+print(f"Transcription time: {transcribe_time:.2f} s")
+print(f"Total pipeline time: {total_time:.2f} s")
+print(f"Audio duration: {DURATION:.2f} s")
+print(f"Transcription RTF: {transcribe_time / DURATION:.2f}x")
+print(f"Total pipeline RTF: {total_time / DURATION:.2f}x")
